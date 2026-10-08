@@ -1,0 +1,266 @@
+name: broker-bench
+
+# Every broker exists as a single node (kafka, rabbit, nats) and as a
+# three-node cluster (kafka-1..3, rabbit-1..3, nats-1..3). cmd/bench starts
+# only the services of the profile under test and removes them afterwards;
+# brokers keep data in anonymous volumes, so each profile starts empty while a
+# killed node restarts on the data it left behind. Only Grafana (3000) and
+# Prometheus (9090) are published to the host.
+
+x-single: &single
+  cpus: 2
+  mem_limit: 2g
+
+x-node: &node
+  cpus: 1.5
+  mem_limit: 1536m
+
+x-kafka-health: &kafka-health
+  test: [CMD-SHELL, /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null]
+  interval: 5s
+  timeout: 20s
+  retries: 30
+  start_period: 10s
+
+x-kafka-env: &kafka-env
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+x-kafka-cluster-env: &kafka-cluster-env
+  <<: *kafka-env
+  CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_HEAP_OPTS: -Xms768m -Xmx768m
+
+# The cookie lets the nodes and the CLI used by the healthcheck talk to each other.
+x-rabbit-entrypoint: &rabbit-entrypoint
+  - sh
+  - -c
+  - |
+    for f in /var/lib/rabbitmq/.erlang.cookie /root/.erlang.cookie; do printf %s broker-bench-cookie > $$f; chmod 400 $$f; done
+    chown rabbitmq:rabbitmq /var/lib/rabbitmq/.erlang.cookie
+    exec docker-entrypoint.sh rabbitmq-server
+
+x-rabbit-env: &rabbit-env
+  RABBITMQ_DEFAULT_USER: bench
+  RABBITMQ_DEFAULT_PASS: bench
+
+x-rabbit-health: &rabbit-health
+  test: [CMD, rabbitmq-diagnostics, -q, check_running]
+  interval: 5s
+  timeout: 20s
+  retries: 30
+  start_period: 10s
+
+x-nats-health: &nats-health
+  test: [CMD, wget, -q, -O, /dev/null, "http://localhost:8222/healthz?js-enabled-only=true"]
+  interval: 2s
+  timeout: 3s
+  retries: 30
+
+services:
+  # --- Kafka ---------------------------------------------------------------
+  kafka:
+    <<: *single
+    image: apache/kafka:4.1.0
+    user: "0:0" # the image's user cannot write to a fresh volume
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_HEAP_OPTS: -Xms1g -Xmx1g
+    volumes: [/var/lib/kafka/data]
+    healthcheck: *kafka-health
+
+  kafka-1:
+    <<: *node
+    image: apache/kafka:4.1.0
+    user: "0:0"
+    environment:
+      <<: *kafka-cluster-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+    volumes: [/var/lib/kafka/data]
+    healthcheck: *kafka-health
+
+  kafka-2:
+    <<: *node
+    image: apache/kafka:4.1.0
+    user: "0:0"
+    environment:
+      <<: *kafka-cluster-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+    volumes: [/var/lib/kafka/data]
+    healthcheck: *kafka-health
+
+  kafka-3:
+    <<: *node
+    image: apache/kafka:4.1.0
+    user: "0:0"
+    environment:
+      <<: *kafka-cluster-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+    volumes: [/var/lib/kafka/data]
+    healthcheck: *kafka-health
+
+  # --- RabbitMQ ------------------------------------------------------------
+  rabbit:
+    <<: *single
+    image: rabbitmq:4.1-management
+    hostname: rabbit # the node name rabbit@rabbit must survive a restart
+    entrypoint: *rabbit-entrypoint
+    environment: *rabbit-env
+    volumes: [/var/lib/rabbitmq]
+    healthcheck: *rabbit-health
+
+  rabbit-1:
+    <<: *node
+    image: rabbitmq:4.1-management
+    hostname: rabbit-1
+    entrypoint: *rabbit-entrypoint
+    environment: *rabbit-env
+    volumes:
+      - /var/lib/rabbitmq
+      - ./config/rabbit/rabbitmq-cluster.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+    healthcheck: *rabbit-health
+
+  rabbit-2:
+    <<: *node
+    image: rabbitmq:4.1-management
+    hostname: rabbit-2
+    entrypoint: *rabbit-entrypoint
+    environment: *rabbit-env
+    volumes:
+      - /var/lib/rabbitmq
+      - ./config/rabbit/rabbitmq-cluster.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+    healthcheck: *rabbit-health
+
+  rabbit-3:
+    <<: *node
+    image: rabbitmq:4.1-management
+    hostname: rabbit-3
+    entrypoint: *rabbit-entrypoint
+    environment: *rabbit-env
+    volumes:
+      - /var/lib/rabbitmq
+      - ./config/rabbit/rabbitmq-cluster.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+    healthcheck: *rabbit-health
+
+  # --- NATS JetStream ------------------------------------------------------
+  nats:
+    <<: *single
+    image: nats:2.11-alpine
+    # nats.conf or nats-sync.conf, chosen by the profile.
+    command: [-c, "/etc/nats/${NATS_CONF:-nats.conf}"]
+    volumes:
+      - /data
+      - ./config/nats:/etc/nats:ro
+    healthcheck: *nats-health
+
+  nats-1:
+    <<: *node
+    image: nats:2.11-alpine
+    command: [-c, /etc/nats/nats-cluster.conf]
+    environment: {NATS_NAME: nats-1}
+    volumes: [/data, "./config/nats:/etc/nats:ro"]
+    healthcheck: *nats-health
+
+  nats-2:
+    <<: *node
+    image: nats:2.11-alpine
+    command: [-c, /etc/nats/nats-cluster.conf]
+    environment: {NATS_NAME: nats-2}
+    volumes: [/data, "./config/nats:/etc/nats:ro"]
+    healthcheck: *nats-health
+
+  nats-3:
+    <<: *node
+    image: nats:2.11-alpine
+    command: [-c, /etc/nats/nats-cluster.conf]
+    environment: {NATS_NAME: nats-3}
+    volumes: [/data, "./config/nats:/etc/nats:ro"]
+    healthcheck: *nats-health
+
+  # --- Load generator and monitoring ---------------------------------------
+  loadgen:
+    build: .
+    image: gotraining/broker-bench-loadgen:local
+    profiles: [load]
+    user: "0:0"
+    environment:
+      BENCH_PROJECT: broker-bench # container names for fault injection
+      KAFKA_SINGLE: kafka:9092
+      KAFKA_CLUSTER: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      RABBIT_SINGLE: amqp://bench:bench@rabbit:5672/
+      RABBIT_CLUSTER: amqp://bench:bench@rabbit-1:5672/,amqp://bench:bench@rabbit-2:5672/,amqp://bench:bench@rabbit-3:5672/
+      RABBIT_HTTP_SINGLE: http://bench:bench@rabbit:15672
+      RABBIT_HTTP_CLUSTER: http://bench:bench@rabbit-1:15672,http://bench:bench@rabbit-2:15672,http://bench:bench@rabbit-3:15672
+      NATS_SINGLE: nats://nats:4222
+      NATS_CLUSTER: nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+      GOMAXPROCS: "3"
+    cpus: 3
+    mem_limit: 1g
+    expose: ["9100"]
+    volumes:
+      - ${RESULTS_DIR:-./results}:/results
+      # Fault injection kills and starts broker containers. This socket gives
+      # the container full control of Docker: a lab-only shortcut.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [monitor]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    cpus: 0.5
+    mem_limit: 512m
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://localhost:9090/-/ready]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: [monitor]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/brokers.json
+      GF_SECURITY_CSRF_TRUSTED_ORIGINS: ${CODESPACE_NAME:-localhost}-3000.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-localhost}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    cpus: 0.5
+    mem_limit: 512m
+    ports: ["127.0.0.1:3000:3000"]
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://localhost:3000/api/health]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  prometheus-data:

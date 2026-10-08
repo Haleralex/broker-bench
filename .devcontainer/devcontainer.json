@@ -1,0 +1,29 @@
+{
+  "name": "broker-bench",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.25"
+    }
+  },
+  "postCreateCommand": "command -v make >/dev/null || (sudo apt-get update && sudo apt-get install -y make)",
+  "hostRequirements": {
+    "cpus": 8,
+    "memory": "16gb"
+  },
+  "forwardPorts": [
+    3000,
+    8090
+  ],
+  "portsAttributes": {
+    "3000": {
+      "label": "Grafana (live)",
+      "onAutoForward": "notify"
+    },
+    "8090": {
+      "label": "Report",
+      "onAutoForward": "openBrowser"
+    }
+  }
+}

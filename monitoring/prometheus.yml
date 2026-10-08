@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 1s
+  evaluation_interval: 1s
+
+scrape_configs:
+  # cmd/loadgen while a profile runs; down between profiles.
+  - job_name: loadgen
+    static_configs:
+      - targets: ["loadgen:9100"]
+  # docker stats published by cmd/bench on the host.
+  - job_name: containers
+    static_configs:
+      - targets: ["host.docker.internal:9101"]

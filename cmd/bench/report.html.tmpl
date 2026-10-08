@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Broker benchmark report</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha384-bs/nf9FbdNouRbMiFcrcZfLXYPKiPaGVGplVbv7dLGECccEXDW+S3zjqSKR5ZEaD" crossorigin="anonymous"></script>
+<style>
+  :root { --bg: #fafaf8; --card: #fff; --text: #1f1f1d; --muted: #6b6a65; --border: #e3e1d9; --bad: #c0392b; --bad-bg: #fcebeb; --good: #2e7d32; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1a; --card: #242423; --text: #ecebe6; --muted: #a3a29b; --border: #3a3a38; --bad: #f09595; --bad-bg: #4a1b1b; --good: #97c459; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 24px; font-weight: 600; margin: 0 0 4px; }
+  h2 { font-size: 18px; font-weight: 600; margin: 40px 0 4px; }
+  p.lead, p.note { color: var(--muted); margin: 0 0 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .card h3 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+  .card .sub { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+  .chart { position: relative; height: 320px; }
+  .chart.small { height: 220px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 14px; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  .scroll { overflow-x: auto; }
+  .bad { color: var(--bad); font-weight: 600; }
+  tr.violation td { background: var(--bad-bg); }
+  .ok { color: var(--good); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kafka · RabbitMQ · NATS JetStream</h1>
+  <p class="lead" id="meta"></p>
+
+  <section id="integritySection" class="hidden">
+    <h2>Целостность при сбоях</h2>
+    <p class="note">Трафик с постоянной скоростью, посреди — kill -9 узла (на кластере — лидера очереди), потом узел поднимается. Каждое сообщение сверяется по номеру.
+      <b>Потеряно</b> — брокер подтвердил запись, а воркеры сообщение так и не получили: брокер нарушил обещание.
+      <b>Доставлено без подтверждения</b> — Send вернул ошибку или таймаут, но сообщение дошло: не нарушение, но продюсер, повторив отправку, создаст дубль.</p>
+    <div class="card scroll"><table id="chaosTable"></table></div>
+    <div class="grid" id="timelines" style="margin-top:16px"></div>
+  </section>
+
+  <section id="throughputSection" class="hidden">
+    <h2>Пропускная способность</h2>
+    <p class="note">Steady: продюсеры шлют по расписанию, воркеры читают. Крестик — шаг насыщен (прочитано меньше 95% цели или очередь не разобралась).</p>
+    <div class="grid">
+      <div class="card"><h3>Задержка e2e p99, мс (лог. шкала)</h3><div class="chart"><canvas id="p99"></canvas></div></div>
+      <div class="card"><h3>Задержка e2e p50, мс (лог. шкала)</h3><div class="chart"><canvas id="p50"></canvas></div></div>
+      <div class="card"><h3>Прочитано в секунду против цели</h3><div class="chart"><canvas id="consumed"></canvas></div></div>
+    </div>
+    <h2>Пределы записи и чтения по отдельности</h2>
+    <p class="note">Fill — только продюсеры, drain — только воркеры, оба на накопленной очереди.</p>
+    <div class="grid">
+      <div class="card"><h3>Сообщений в секунду</h3><div class="chart"><canvas id="closed"></canvas></div></div>
+      <div class="card"><h3>p99 одной пачки, мс (лог. шкала)</h3><div class="chart"><canvas id="calls"></canvas></div></div>
+    </div>
+    <h2>CPU контейнеров</h2>
+    <p class="note">docker stats раз в ~2 с, 100% = одно ядро. Лимиты: одиночный брокер 2 ядра, узел кластера 1.5, loadgen 3.</p>
+    <div class="grid" id="cpu"></div>
+    <h2>Медианы</h2>
+    <div class="card scroll"><table id="profilesTable"></table></div>
+    <div class="card scroll" style="margin-top:16px"><table id="stepsTable"></table></div>
+  </section>
+</main>
+
+<script>
+const DATA = {{.}};
+// One hue per broker family, shades per profile.
+const FAMILY = {
+  kafka: ['#993C1D', '#D85A30', '#F0997B', '#712B13'],
+  rabbit: ['#3B6D11', '#639922', '#97C459', '#27500A', '#C0DD97'],
+  nats: ['#0C447C', '#378ADD', '#85B7EB', '#185FA5'],
+};
+const COLORS = {};
+const used = { kafka: 0, rabbit: 0, nats: 0 };
+for (const name of DATA.names) {
+  const fam = DATA.brokers[name];
+  COLORS[name] = FAMILY[fam][used[fam]++ % FAMILY[fam].length];
+}
+const CONTAINER_COLORS = { loadgen: '#888780' };
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+Chart.defaults.color = css('--muted');
+Chart.defaults.borderColor = css('--border');
+Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+const fmt = (v, d = 0) => v == null ? '—' : Number(v).toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: d });
+const head = n => `<span class="dot" style="background:${COLORS[n]}"></span>${n}`;
+
+const meta = [];
+if (DATA.experiment) meta.push(`пропускная способность: ${DATA.experiment}`);
+if (DATA.chaos_experiment) meta.push(`сбои: ${DATA.chaos_experiment}`);
+document.getElementById('meta').textContent = `Эксперименты — ${meta.join(' · ')} · сгенерировано ${DATA.generated}`;
+
+// ---------- integrity ----------
+if (DATA.chaos && DATA.chaos.length) {
+  document.getElementById('integritySection').classList.remove('hidden');
+  document.getElementById('chaosTable').innerHTML =
+    '<tr><th>профиль</th><th>сбой</th><th>убит узел</th><th>прогонов</th><th>подтверждено</th><th>потеряно</th><th>прогонов с потерей</th><th>доставлено без подтверждения</th><th>не подтверждено</th><th>дубли</th><th>продюсеры стояли, с</th><th>воркеры стояли, с</th></tr>' +
+    DATA.chaos.map(s => `<tr class="${s.Lost > 0 ? 'violation' : ''}"><td>${head(s.Profile)}</td><td>${s.Fault}</td><td>${s.Target || '—'}</td><td>${s.Runs}${s.Failed ? ` <span class="bad">(+${s.Failed} упало)</span>` : ''}</td><td>${fmt(s.Confirmed)}</td>` +
+      `<td class="${s.Lost > 0 ? 'bad' : 'ok'}">${fmt(s.Lost)}</td><td>${s.RunsWithLoss}/${s.Runs}</td><td>${fmt(s.DeliveredUnconfirmed)}</td><td>${fmt(s.Unconfirmed)}</td><td>${fmt(s.Duplicates)}</td><td>${fmt(s.ProducerStall)}</td><td>${fmt(s.ConsumerStall)}</td></tr>`).join('');
+
+  const timelines = document.getElementById('timelines');
+  for (const run of DATA.chaos_runs) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const lost = run.integrity.lost;
+    card.innerHTML = `<h3>${head(run.profile)} <span style="color:var(--muted);font-weight:400;font-size:12px">${run.id}</span></h3>` +
+      `<p class="sub">${run.fault.kind}${run.fault.target ? ' ' + run.fault.target : ''} · потеряно <span class="${lost > 0 ? 'bad' : 'ok'}">${fmt(lost)}</span> · без подтверждения дошло ${fmt(run.integrity.delivered_unconfirmed)} · дубли ${fmt(run.integrity.duplicates)}${run.fault.error ? ` · <span class="bad">${run.fault.error}</span>` : ''}</p>` +
+      '<div class="chart small"><canvas></canvas></div>';
+    timelines.appendChild(card);
+    const t = run.timeline.map(s => s.t);
+    const peak = Math.max(1, ...run.timeline.map(s => Math.max(s.confirmed, s.consumed, s.send_errors)));
+    const down = run.timeline.map(s => (run.fault.injected_at_s && s.t + 1 > run.fault.injected_at_s && (!run.fault.recovered_at_s || s.t < run.fault.recovered_at_s)) ? peak : null);
+    new Chart(card.querySelector('canvas'), {
+      type: 'line',
+      data: { labels: t, datasets: [
+        { label: 'узел лежит', data: down, borderWidth: 0, pointRadius: 0, fill: 'origin', backgroundColor: 'rgba(226,75,74,0.15)', stepped: true },
+        { label: 'подтверждено/с', data: run.timeline.map(s => s.confirmed), borderColor: COLORS[run.profile], pointRadius: 0, borderWidth: 2 },
+        { label: 'прочитано/с', data: run.timeline.map(s => s.consumed), borderColor: '#1D9E75', pointRadius: 0, borderWidth: 1.5, borderDash: [4, 3] },
+        { label: 'ошибки отправки/с', data: run.timeline.map(s => s.send_errors), borderColor: '#E24B4A', pointRadius: 0, borderWidth: 1.5 },
+      ] },
+      options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+        scales: { x: { title: { display: true, text: 'секунды от начала трафика' }, ticks: { maxTicksLimit: 12 } }, y: { beginAtZero: true } },
+        plugins: { legend: { labels: { boxWidth: 12 } } } },
+    });
+  }
+}
+
+// ---------- throughput ----------
+if (DATA.profiles && DATA.profiles.length) {
+  document.getElementById('throughputSection').classList.remove('hidden');
+  const profiles = DATA.names.filter(n => DATA.profiles.some(p => p.Profile === n));
+  const rates = [...new Set(DATA.steps.map(s => s.Rate))].sort((a, b) => a - b);
+  const step = (p, r) => DATA.steps.find(s => s.Profile === p && s.Rate === r);
+
+  function lineByRate(id, value, opts = {}) {
+    const datasets = profiles.map(p => ({
+      label: p,
+      data: rates.map(r => { const s = step(p, r); return s ? value(s) : null; }),
+      borderColor: COLORS[p], backgroundColor: COLORS[p],
+      pointStyle: rates.map(r => { const s = step(p, r); return s && s.Saturated > 0 ? 'crossRot' : 'circle'; }),
+      pointRadius: 6, borderWidth: 2, spanGaps: true,
+    }));
+    if (opts.target) datasets.push({ label: 'цель', data: rates, borderColor: css('--muted'), borderDash: [4, 4], pointRadius: 0, borderWidth: 1 });
+    new Chart(document.getElementById(id), {
+      type: 'line',
+      data: { labels: rates.map(r => fmt(r) + '/s'), datasets },
+      options: {
+        maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+        scales: { y: { type: opts.log ? 'logarithmic' : 'linear', beginAtZero: !opts.log } },
+        plugins: { legend: { labels: { boxWidth: 12 } }, tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y, opts.digits ?? 0)}` } } },
+      },
+    });
+  }
+  lineByRate('p99', s => s.P99, { log: true, digits: 1 });
+  lineByRate('p50', s => s.P50, { log: true, digits: 1 });
+  lineByRate('consumed', s => s.Consumed, { target: true });
+
+  function bars(id, groups, opts = {}) {
+    new Chart(document.getElementById(id), {
+      type: 'bar',
+      data: { labels: profiles, datasets: groups.map((g, i) => ({
+        label: g.label, data: profiles.map(p => g.value(DATA.profiles.find(x => x.Profile === p))),
+        backgroundColor: profiles.map(p => COLORS[p] + (i === 0 ? '' : '77')), borderColor: profiles.map(p => COLORS[p]), borderWidth: 1,
+      })) },
+      options: { maintainAspectRatio: false, plugins: { legend: { display: groups.length > 1 } }, scales: { y: { type: opts.log ? 'logarithmic' : 'linear', beginAtZero: !opts.log } } },
+    });
+  }
+  bars('closed', [{ label: 'fill (запись)', value: p => p.FillRate }, { label: 'drain (чтение)', value: p => p.DrainRate }]);
+  bars('calls', [{ label: 'send p99', value: p => p.SendP99 }, { label: 'receive p99', value: p => p.ReceiveP99 }], { log: true });
+
+  const cpu = document.getElementById('cpu');
+  for (const p of profiles) {
+    const view = DATA.cpu[p];
+    if (!view) continue;
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `<h3>${head(p)}</h3><div class="chart small"><canvas></canvas></div>`;
+    cpu.appendChild(card);
+    const shades = FAMILY[DATA.brokers[p]];
+    new Chart(card.querySelector('canvas'), {
+      type: 'line',
+      data: { datasets: Object.entries(view.series).sort().map(([name, points], i) => ({
+        label: name, data: points.map(([x, y]) => ({ x, y })), borderColor: CONTAINER_COLORS[name] || shades[i % shades.length],
+        pointRadius: 0, borderWidth: 1.5,
+      })) },
+      options: { maintainAspectRatio: false, parsing: false, scales: { x: { type: 'linear', title: { display: true, text: 'секунды' } }, y: { beginAtZero: true, title: { display: true, text: '% CPU' } } } },
+    });
+  }
+
+  document.getElementById('profilesTable').innerHTML =
+    '<tr><th>профиль</th><th>прогонов</th><th>упало</th><th>fill msg/s</th><th>send p99</th><th>drain msg/s</th><th>receive p99</th><th>дубли</th></tr>' +
+    DATA.profiles.map(p => `<tr><td>${head(p.Profile)}</td><td>${p.Runs}</td><td>${p.Failed}</td><td>${fmt(p.FillRate)}</td><td>${fmt(p.SendP99, 1)}</td><td>${fmt(p.DrainRate)}</td><td>${fmt(p.ReceiveP99, 1)}</td><td>${p.Duplicates}</td></tr>`).join('');
+  document.getElementById('stepsTable').innerHTML =
+    '<tr><th>скорость</th><th>профиль</th><th>прогонов</th><th>прочитано/s</th><th>p50</th><th>p99</th><th>p99.9</th><th>backlog</th><th>насыщен</th></tr>' +
+    DATA.steps.map(s => `<tr><td>${fmt(s.Rate)}</td><td>${head(s.Profile)}</td><td>${s.Runs}</td><td>${fmt(s.Consumed)}</td><td>${fmt(s.P50, 1)}</td><td>${fmt(s.P99, 1)}</td><td>${fmt(s.P999, 1)}</td><td>${fmt(s.Backlog)}</td><td class="${s.Saturated ? 'bad' : ''}">${s.Saturated}/${s.Runs}</td></tr>`).join('');
+}
+</script>
+</body>
+</html>
