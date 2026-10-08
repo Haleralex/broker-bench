@@ -234,7 +234,8 @@ func (r *runner) runFault(ctx context.Context, fault Fault, start time.Time, cfg
 }
 
 // chaosTraffic is steady's schedule without the measurement window: a failed
-// or slow Send is counted and the producer moves on to its next slot.
+// or slow Send is counted and the producer moves on to its next slot. Slots
+// still due when the traffic ends are never sent and not counted.
 func (r *runner) chaosTraffic(ctx context.Context, cfg ChaosConfig, start time.Time) error {
 	batch := min(cfg.Batch, max(1, cfg.Rate/steadyBatchesPerSecond))
 	interval := time.Duration(float64(time.Second) * float64(batch) / float64(cfg.Rate))
@@ -242,7 +243,11 @@ func (r *runner) chaosTraffic(ctx context.Context, cfg ChaosConfig, start time.T
 	return r.parallel(ctx, cfg.Producers, func(ctx context.Context, p int) error {
 		for k := p; ; k += cfg.Producers {
 			due := start.Add(time.Duration(k) * interval)
-			if !due.Before(end) {
+			// A producer that fell behind (every Send timing out while the
+			// broker is gone) stops with the traffic instead of working
+			// through the missed slots afterwards: at one timeout per slot
+			// that would take hours.
+			if !due.Before(end) || !time.Now().Before(end) {
 				return nil
 			}
 			if wait := time.Until(due); wait > 0 {

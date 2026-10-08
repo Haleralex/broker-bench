@@ -25,6 +25,12 @@ type crashable struct {
 	lostAcks bool
 	// receiveDelay slows workers down so that a backlog builds up.
 	receiveDelay time.Duration
+	// hang makes Send wait for its context while the broker is down, like a
+	// client waiting for an acknowledgement that never comes.
+	hang bool
+	// stayDown keeps the broker down after Recover, like a stream that did
+	// not survive the restart.
+	stayDown bool
 }
 
 var errDown = errors.New("broker down")
@@ -40,8 +46,13 @@ func (m *crashable) NewConsumer(context.Context) (queue.Consumer, error) {
 	return crashConsumer{m}, nil
 }
 
-func (m *crashable) Send(_ context.Context, payloads [][]byte) error {
+func (m *crashable) Send(ctx context.Context, payloads [][]byte) error {
 	m.mu.Lock()
+	if m.down && m.hang {
+		m.mu.Unlock()
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	defer m.mu.Unlock()
 	if m.down {
 		if m.lostAcks {
@@ -90,7 +101,7 @@ func (f crash) Inject(context.Context) (string, error) {
 func (f crash) Recover(context.Context) error {
 	f.m.mu.Lock()
 	defer f.m.mu.Unlock()
-	f.m.down = false
+	f.m.down = f.m.stayDown
 	return nil
 }
 
@@ -171,5 +182,23 @@ func TestChaosWithoutFault(t *testing.T) {
 	}
 	if res.ProducerStall != 0 {
 		t.Fatalf("stall without fault: %+v", res)
+	}
+}
+
+func TestChaosStopsWhenTrafficEndsEvenIfSendsHang(t *testing.T) {
+	m := &crashable{hang: true, stayDown: true}
+	cfg := chaosTestConfig()
+	cfg.SendTimeout = time.Second
+	started := time.Now()
+	res, err := RunChaos(t.Context(), m, cfg, crash{m}, "kill", nil, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Traffic 6s, at most one hanging Send past its end, then the quiet period.
+	if elapsed := time.Since(started); elapsed > cfg.Duration+cfg.SendTimeout+cfg.Quiet+3*time.Second {
+		t.Fatalf("run took %s: producers kept working through missed slots", elapsed)
+	}
+	if in := res.Integrity; in.Lost != 0 || in.Unconfirmed == 0 || in.Reserved >= int64(cfg.Rate)*int64(cfg.Duration.Seconds()) {
+		t.Fatalf("integrity: %+v", in)
 	}
 }
