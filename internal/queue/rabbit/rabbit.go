@@ -300,6 +300,9 @@ type consumer struct {
 // prefetch lets the broker push a few batches ahead of the worker.
 const prefetchBatches = 2
 
+// batchWait bounds how long Receive waits to fill a batch after its first message.
+const batchWait = 5 * time.Millisecond
+
 func (c *consumer) Receive(ctx context.Context, limit int, handle func([]byte)) (int, error) {
 	if c.ch == nil || c.ch.IsClosed() {
 		if err := c.subscribe(ctx, limit); err != nil {
@@ -317,7 +320,11 @@ func (c *consumer) Receive(ctx context.Context, limit int, handle func([]byte)) 
 		}
 		batch = append(batch, d)
 	}
-	// Take what has already arrived, without waiting for a full batch.
+	// The client hands deliveries over one at a time; wait briefly for the
+	// rest of a batch instead of taking only what is ready this instant, which
+	// would leave a worker that pauses between batches with batches of one.
+	gather := time.NewTimer(batchWait)
+	defer gather.Stop()
 more:
 	for len(batch) < limit {
 		select {
@@ -326,7 +333,7 @@ more:
 				break more
 			}
 			batch = append(batch, d)
-		default:
+		case <-gather.C:
 			break more
 		}
 	}

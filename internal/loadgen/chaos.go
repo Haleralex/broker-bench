@@ -143,7 +143,8 @@ func RunChaos(ctx context.Context, b queue.Backend, cfg ChaosConfig, fault Fault
 	}
 	base := Config{Producers: cfg.Producers, Consumers: cfg.Consumers, Batch: cfg.Batch, Payload: cfg.Payload, DrainTimeout: cfg.Settle, Idle: cfg.Idle}
 	capacity := uint64(float64(cfg.Rate)*cfg.Duration.Seconds()*1.2) + uint64(primeMessages(base)) + 1<<16
-	r := &runner{b: b, cfg: base, obs: obs, log: log, t: newTracker(capacity), e2e: newSamples(cfg.Consumers), tolerateErrors: true, work: cfg.Work}
+	r := &runner{b: b, cfg: base, obs: obs, log: log, t: newTracker(capacity), e2e: newSamples(cfg.Consumers), tolerateErrors: true}
+	r.work.Store(int64(cfg.Work))
 	defer obs.Phase("done", 0)
 	for range cfg.Consumers {
 		c, err := b.NewConsumer(ctx)
@@ -192,6 +193,9 @@ func RunChaos(ctx context.Context, b queue.Backend, cfg ChaosConfig, fault Fault
 	}
 
 	obs.Phase("catch_up", 0)
+	// Traffic is over: workers drain at full speed, so whatever is still
+	// missing at the end is really gone and not just unread.
+	r.work.Store(0)
 	settleStart := time.Now()
 	r.settle(ctx, cfg)
 	res.SettleSeconds = time.Since(settleStart).Seconds()

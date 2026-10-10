@@ -14,7 +14,8 @@ def panel(kind, title, x, y, w, h, targets, unit=None, description=None, log=Fal
     p = {
         "id": next_id[0], "type": kind, "title": title, "datasource": DS,
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
-        "targets": [target(e, l, chr(ord("A") + i)) for i, (e, l) in enumerate(targets)],
+        "targets": [target(e, l, chr(ord("A") + i)) | ({"instant": True, "range": False} if kind == "stat" else {})
+                    for i, (e, l) in enumerate(targets)],
         "fieldConfig": {"defaults": {}, "overrides": overrides or []},
         "options": options or {},
     }

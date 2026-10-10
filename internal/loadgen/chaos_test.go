@@ -223,3 +223,17 @@ func TestChaosWorkBuildsABacklogThatACrashCanLose(t *testing.T) {
 		t.Fatalf("-work not forwarded: %v", flags)
 	}
 }
+
+func TestChaosDrainsAtFullSpeedAfterTraffic(t *testing.T) {
+	cfg := chaosTestConfig()
+	// 20 messages per 100 ms per worker: far below the 2000/s sent, so a large
+	// backlog is left when traffic ends and must not be mistaken for loss.
+	cfg.Work = 100 * time.Millisecond
+	res, err := RunChaos(t.Context(), &crashable{}, cfg, nil, "none", nil, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in := res.Integrity; in.Lost != 0 || in.Consumed != in.Confirmed {
+		t.Fatalf("backlog left unread counted as loss: %+v", in)
+	}
+}

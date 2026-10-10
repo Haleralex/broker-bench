@@ -55,7 +55,8 @@
           "expr": "max by (profile) (queuebench_run_info) and on() (max(queuebench_phase{phase!=\"done\"}) == 1)",
           "legendFormat": "{{profile}}",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -100,7 +101,8 @@
           "expr": "max by (phase) (queuebench_phase == 1)",
           "legendFormat": "{{phase}}",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -145,7 +147,8 @@
           "expr": "max(queuebench_target_rate) and on() (max(queuebench_phase{phase!=\"done\"}) == 1)",
           "legendFormat": "цель",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -191,7 +194,8 @@
           "expr": "max by (target) (queuebench_fault == 1)",
           "legendFormat": "{{target}}",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {

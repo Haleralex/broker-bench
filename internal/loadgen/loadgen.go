@@ -152,8 +152,8 @@ type runner struct {
 	workersFailed atomic.Bool
 	// tolerateErrors keeps workers retrying through broker failures (chaos runs).
 	tolerateErrors bool
-	timeline       *timeline     // per-second counters of chaos runs; nil otherwise
-	work           time.Duration // pause after every received batch (chaos -work)
+	timeline       *timeline    // per-second counters of chaos runs; nil otherwise
+	work           atomic.Int64 // pause in ns after every received batch (chaos -work)
 }
 
 func (r *runner) phases(ctx context.Context, res *Result) error {
@@ -400,10 +400,10 @@ func (r *runner) startConsumers(ctx context.Context, calls *samples) func() erro
 						calls.add(i, took)
 					}
 					// Simulated processing: a slow worker leaves a backlog in the broker.
-					if r.work > 0 {
+					if work := time.Duration(r.work.Load()); work > 0 {
 						select {
 						case <-ctx.Done():
-						case <-time.After(r.work):
+						case <-time.After(work):
 						}
 					}
 				}
