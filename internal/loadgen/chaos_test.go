@@ -204,3 +204,22 @@ func TestChaosStopsWhenTrafficEndsEvenIfSendsHang(t *testing.T) {
 		t.Fatalf("integrity: %+v", in)
 	}
 }
+
+func TestChaosWorkBuildsABacklogThatACrashCanLose(t *testing.T) {
+	m := &crashable{loseOnCrash: true}
+	cfg := chaosTestConfig()
+	// One worker handles at most 20 messages per 10 ms, 2000/s, against 4000/s sent.
+	cfg.Consumers, cfg.Rate, cfg.Work = 1, 4000, 10*time.Millisecond
+	res, err := RunChaos(t.Context(), m, cfg, crash{m}, "kill", nil, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// About 2000/s accumulate for the two seconds before the crash.
+	if res.Integrity.Lost < 1000 {
+		t.Fatalf("backlog not lost: %+v", res.Integrity)
+	}
+	flags := cfg.Args()
+	if !slices.Contains(flags, "-work") || !slices.Contains(flags, "10ms") {
+		t.Fatalf("-work not forwarded: %v", flags)
+	}
+}

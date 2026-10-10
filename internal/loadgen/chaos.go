@@ -28,6 +28,10 @@ type ChaosConfig struct {
 	Settle      time.Duration `json:"settle_ns"`       // longest wait for stragglers after traffic
 	Quiet       time.Duration `json:"quiet_ns"`        // settling ends after this long without new messages
 	Idle        time.Duration `json:"idle_ns"`         // pause after an empty poll
+	// Work is how long a worker spends on each received batch. It caps a
+	// worker at Batch/Work messages per second, so a higher -rate builds a
+	// backlog: what a broker keeps in memory only is lost in a crash.
+	Work time.Duration `json:"work_ns"`
 }
 
 func ChaosDefaults() ChaosConfig {
@@ -47,6 +51,8 @@ func (c ChaosConfig) Validate() error {
 		return errors.New("-rate must be 1..1000000")
 	case c.Duration < 5*time.Second || c.FaultAt <= 0 || c.FaultAt >= c.Duration:
 		return errors.New("-duration must be at least 5s and -fault-at inside it")
+	case c.Work < 0 || c.Work > 10*time.Second:
+		return errors.New("-work must be 0..10s")
 	case c.Downtime < 0 || c.SendTimeout < 100*time.Millisecond || c.Settle < c.Quiet || c.Quiet < time.Second:
 		return errors.New("-downtime not negative, -send-timeout at least 100ms, -quiet at least 1s and not above -settle")
 	}
@@ -137,7 +143,7 @@ func RunChaos(ctx context.Context, b queue.Backend, cfg ChaosConfig, fault Fault
 	}
 	base := Config{Producers: cfg.Producers, Consumers: cfg.Consumers, Batch: cfg.Batch, Payload: cfg.Payload, DrainTimeout: cfg.Settle, Idle: cfg.Idle}
 	capacity := uint64(float64(cfg.Rate)*cfg.Duration.Seconds()*1.2) + uint64(primeMessages(base)) + 1<<16
-	r := &runner{b: b, cfg: base, obs: obs, log: log, t: newTracker(capacity), e2e: newSamples(cfg.Consumers), tolerateErrors: true}
+	r := &runner{b: b, cfg: base, obs: obs, log: log, t: newTracker(capacity), e2e: newSamples(cfg.Consumers), tolerateErrors: true, work: cfg.Work}
 	defer obs.Phase("done", 0)
 	for range cfg.Consumers {
 		c, err := b.NewConsumer(ctx)
@@ -327,6 +333,7 @@ func (c *ChaosConfig) RegisterFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.Settle, "settle", c.Settle, "longest wait for stragglers after traffic")
 	fs.DurationVar(&c.Quiet, "quiet", c.Quiet, "settling ends after this long without a new message")
 	fs.DurationVar(&c.Idle, "idle", c.Idle, "pause after an empty poll of a non-blocking backend")
+	fs.DurationVar(&c.Work, "work", c.Work, "processing time per received batch; caps each worker at batch/work msg/s so a backlog builds up")
 }
 
 func (c ChaosConfig) Args() []string {
@@ -335,6 +342,6 @@ func (c ChaosConfig) Args() []string {
 		"-batch", strconv.Itoa(c.Batch), "-payload", strconv.Itoa(c.Payload), "-rate", strconv.Itoa(c.Rate),
 		"-duration", c.Duration.String(), "-fault-at", c.FaultAt.String(), "-downtime", c.Downtime.String(),
 		"-send-timeout", c.SendTimeout.String(), "-settle", c.Settle.String(), "-quiet", c.Quiet.String(),
-		"-idle", c.Idle.String(),
+		"-idle", c.Idle.String(), "-work", c.Work.String(),
 	}
 }
